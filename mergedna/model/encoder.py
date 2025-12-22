@@ -1,27 +1,43 @@
-from torch import nn
-from mdna.merging import LocalTokenMerge
+import torch
+import torch.nn as nn
+from mdna.merging import DynamicTokenMerge
+from mdna.utils import TransformerBlock, SinusoidalPositionalEmbedding
 
-class MergeDNAEncoder(nn.Module):
-    def __init__(self, ...):
+class LocalEncoderBlock(nn.Module):
+    def __init__(self, dim, heads, mlp_dim, dropout=0.1):
+        super().__init__()
+        self.transformer = TransformerBlock(dim, heads, mlp_dim, dropout)
+        self.merger = DynamicTokenMerge(dim)
+        
+    def forward(self, x):
+        x = self.transformer(x)
+        x = self.merger(x)
+        return x
+
+class LocalEncoder(nn.Module):
+    def __init__(self, layers, dim, heads, mlp_dim, dropout=0.1):
         super().__init__()
         self.blocks = nn.ModuleList([
-            TransformerBlock(...),
-            TransformerBlock(...),
-            TransformerBlock(...)
+            LocalEncoderBlock(dim, heads, mlp_dim, dropout)
+            for _ in range(layers)
         ])
         
-        # The merging layer from your folder
-        self.merger = LocalTokenMerge(dim=768)
-
     def forward(self, x):
-        # Layer 1: Process raw bases
-        x = self.blocks[0](x)
+        for block in self.blocks:
+            x = block(x)
+        return x
+
+class LatentEncoder(nn.Module):
+    def __init__(self, layers, dim, heads, mlp_dim, dropout=0.1):
+        super().__init__()
+        self.pos_emb = SinusoidalPositionalEmbedding(dim)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(dim, heads, mlp_dim, dropout)
+            for _ in range(layers)
+        ])
         
-        # MERGE STEP: Reduce sequence length (Context Awareness)
-        # "Zoom out" from 1000bp -> 500bp
-        x = self.merger(x) 
-        
-        # Layer 2: Process the merged "words"
-        x = self.blocks[1](x)
-        
+    def forward(self, x):
+        x = self.pos_emb(x)
+        for block in self.blocks:
+            x = block(x)
         return x
