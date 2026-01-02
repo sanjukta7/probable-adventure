@@ -8,6 +8,6 @@ This is inspired by the following research papers: https://arxiv.org/pdf/2511.14
 ## steps to download and use the genomic benchmark datasets 
 
 ```bash
-uv pip install genomic-benchmarks
+uv run scripts/data
 ```
 
