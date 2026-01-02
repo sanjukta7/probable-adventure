@@ -245,3 +245,4 @@ class ToyDNADataset(Dataset):
         seq = torch.randint(0, 4, (self.seq_len,))
         return seq
 
+
