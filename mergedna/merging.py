@@ -129,35 +129,31 @@ class MergeDNALayer(nn.Module):
             mask.scatter_(1, global_b_indices, False)
             
         # 4. Compute Merged Features
-        # x_merged starts as just the kept tokens
-        x_kept = x[mask].view(B, N - r, C)
-        
-        # Now add the "absorbed" information
         # Get the features of the B tokens being merged
         b_features = torch.gather(x, 1, global_b_indices.unsqueeze(-1).expand(-1, -1, C))
         
-        # We need to add b_features to the specific A tokens in x_kept.
-        # This requires knowing where those A tokens ended up in the reduced array.
-        # Since we only removed tokens *after* even indices (mostly), we can map strictly.
-        # But generally, ToMe implementations simply perform the add on the full tensor 
-        # before masking.
-        
+        # Add B features to their paired A tokens
         x_out = x.clone()
-        # Add B to A
-        # x_out[batch, global_a] += x_out[batch, global_b]
-        # We use scatter_add for batching
         x_out.scatter_add_(1, global_a_indices.unsqueeze(-1).expand(-1, -1, C), b_features)
         
-        # Average the features (Paper mentions weighted average or sum)
-        # Count map to normalize
+        # Average the features (normalize by count)
         counts = torch.ones(B, N, 1, device=x.device)
         counts.scatter_add_(1, global_a_indices.unsqueeze(-1).expand(-1, -1, 1), 
                             torch.ones_like(b_features[:, :, :1]))
-        
         x_out = x_out / counts
         
-        # Finally, remove the B tokens that were merged
-        x_final = x_out[mask].view(B, N - r, C)
+        # Get indices of kept tokens (where mask is True)
+        kept_indices = torch.nonzero(mask, as_tuple=False)  # [num_kept, 2]
+        
+        # Gather kept tokens properly for each batch
+        kept_per_batch = mask.sum(dim=1)  # Should be N - r for each batch
+        
+        # Use a loop for clarity (can be vectorized for large batches)
+        x_final_list = []
+        for b in range(B):
+            batch_mask = mask[b]  # [N]
+            x_final_list.append(x_out[b, batch_mask])  # [N-r, C]
+        x_final = torch.stack(x_final_list, dim=0)  # [B, N-r, C]
         
         # 5. Return Merge Map for Unmerging
         # The unmerge map needs to tell us: for the resulting N-r tokens, 
@@ -232,7 +228,8 @@ def example_usage():
     unmerger = MergeDNAUnmerge()
     x_recon = unmerger(x_processed, source_map)
     
-    print(f"Recon Shape:    {x_recon.shape}")  # [2, 10, 8]
+    print(f"Recon Shape:    {x_recon.shape}") 
+    print(torch.sum(x_recon - x)) # [2, 10, 8]
     
     # Verify values for a merged pair (Checking the broadcast)
     # If token 0 and 1 merged, x_recon[0] should equal x_recon[1]

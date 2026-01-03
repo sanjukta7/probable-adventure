@@ -29,6 +29,13 @@ def dataloader(dir_path: str):
 
     return sequences
 
+def merge_sequences(sequences: dict):
+    merged_sequences = []
+    for key, value in sequences.items():
+        for subkey, subvalue in value.items():
+            for item in subvalue:
+                merged_sequences.append(item)
+    return merged_sequences
 
 def main():
     sequences = dataloader("data/human_nontata_promoters/")

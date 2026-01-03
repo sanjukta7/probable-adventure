@@ -1,77 +1,39 @@
-import sys
-import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
 
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from model.backbone import MergeDNAModel
+def train_mergedna(seq_dictionary, save_path="mergedna_ckpt.pt", epochs=5, batch_size=2):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training on {device}")
 
-# Toy Dataset
-class ToyDNADataset(Dataset):
-    def __init__(self, size=1000, seq_len=128):
-        self.size = size
-        self.seq_len = seq_len
-        self.vocab = [0, 1, 2, 3] # A, C, G, T
-
-    def __len__(self):
-        return self.size
-
-    def __getitem__(self, idx):
-        # Generate random sequence
-        seq = torch.randint(0, 4, (self.seq_len,))
-        return seq
-
-def train():
-    # Hyperparams
-    VOCAB_SIZE = 4
-    DIM = 64
-    SEQ_LEN = 128
-    BATCH_SIZE = 16
-    EPOCHS = 2
-    LR = 1e-3
+    # 1. Data
+    dataset = DNADataset(seq_dictionary)
+    # Collate function to pad sequences if they differ in length
+    def collate_fn(batch):
+        return torch.nn.utils.rnn.pad_sequence(batch, batch_first=True, padding_value=0)
     
-    # Checkpoints
-    CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
 
-    # Data
-    dataset = ToyDNADataset(size=1000, seq_len=SEQ_LEN)
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
-
-    # Model
-    model = MergeDNAModel(
-        vocab_size=VOCAB_SIZE, 
-        dim=DIM,
-        local_layers=2,  # Reduces 128 -> 64 -> 32
-        latent_layers=2,
-        heads=4,
-        mlp_dim=128
-    )
+    # 2. Model Init
+    DIM = 64 # Small for demo
+    local_enc = MockLocalEncoder(DIM)
+    local_dec = MockLocalDecoder(DIM)
     
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=LR)
+    model = MergeDNAModel(local_enc, local_dec, dim=DIM, latent_enc_depth=2, latent_dec_depth=1)
+    model.to(device)
 
-    print("Starting training...")
-    print(f"Model params: {sum(p.numel() for p in model.parameters())}")
-    
-    model.train()
-    for epoch in range(EPOCHS):
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4)
+
+    # 3. Loop
+    for epoch in range(epochs):
+        model.train()
         total_loss = 0
-        for batch_idx, batch in enumerate(loader):
-            # batch: [B, Seq_Len]
+        
+        for batch_idx, batch in enumerate(dataloader):
+            batch = batch.to(device) # [B, N] (Indices)
+            
             optimizer.zero_grad()
             
-            # Forward (Autoencoder task: Predict input)
-            logits = model(batch)
-            
-            # Reshape for loss
-            # logits: [B, Seq_Len, Vocab]
-            # target: [B, Seq_Len]
-            loss = criterion(logits.view(-1, VOCAB_SIZE), batch.view(-1))
+            # Forward pass (computes all losses internally)
+            loss, logs = model.forward_train(batch)
             
             loss.backward()
             optimizer.step()
@@ -79,20 +41,17 @@ def train():
             total_loss += loss.item()
             
             if batch_idx % 10 == 0:
-                print(f"Epoch {epoch} | Batch {batch_idx} | Loss {loss.item():.4f}")
-                
-        print(f"Epoch {epoch} Average Loss: {total_loss / len(loader):.4f}")
-        
-        # Save checkpoint
-        checkpoint_path = os.path.join(CHECKPOINT_DIR, f'mergedna_epoch_{epoch}.pt')
+                print(f"Epoch {epoch} | Step {batch_idx} | Loss: {loss.item():.4f} | "
+                      f"MTR: {logs['loss_mtr']:.3f} Latent: {logs['loss_latent']:.3f} AMTM: {logs['loss_amtm']:.3f}")
+
+        avg_loss = total_loss / len(dataloader)
+        print(f"=== Epoch {epoch} Completed. Avg Loss: {avg_loss:.4f} ===")
+
+        # Save Checkpoint
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'loss': total_loss / len(loader),
-        }, checkpoint_path)
-        print(f"Saved checkpoint to {checkpoint_path}")
-
-if __name__ == "__main__":
-    train()
-
+            'loss': avg_loss,
+        }, save_path)
+        print(f"Checkpoint saved to {save_path}")
