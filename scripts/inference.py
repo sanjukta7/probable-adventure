@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Union
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from model.backbone import MergeDNAModel, MergeDNAClassifier
-from data.dataloader import DNATokenizer
+from dataloader import DNATokenizer
 
 
 def predict_promoter(
@@ -234,5 +234,6 @@ if __name__ == "__main__":
     print(f"  Sequence: {result['sequence_preview']}")
     print(f"  Prediction: {result['prediction']}")
     print(f"  Confidence: {result['confidence']:.4f}")
+
 
 
