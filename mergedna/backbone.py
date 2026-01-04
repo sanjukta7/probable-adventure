@@ -11,17 +11,21 @@ class FlashAttention(nn.Module):
     """
     def __init__(self, dim, num_heads=8, dropout=0.1):
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
+        # Ensure num_heads doesn't exceed dim and head_dim >= 1
+        self.num_heads = min(num_heads, dim)
+        self.head_dim = max(dim // self.num_heads, 1)
         self.scale = self.head_dim ** -0.5
         
-        self.qkv = nn.Linear(dim, dim * 3)
+        # Adjust projection dims to match num_heads * head_dim
+        inner_dim = self.num_heads * self.head_dim
+        self.qkv = nn.Linear(dim, inner_dim * 3)
         self.attn_drop = nn.Dropout(dropout)
-        self.proj = nn.Linear(dim, dim)
+        self.proj = nn.Linear(inner_dim, dim)
         self.proj_drop = nn.Dropout(dropout)
 
     def forward(self, x):
         B, N, C = x.shape
+        inner_dim = self.num_heads * self.head_dim
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
@@ -30,7 +34,7 @@ class FlashAttention(nn.Module):
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, inner_dim)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -83,9 +87,13 @@ class GlobalTokenSelector(nn.Module):
             group_sizes: [B, K] -> how many tokens were merged into each selected token
         """
         B, L, D = x.shape
+        
+        # Ensure k_target is valid
+        k_target = max(1, min(k_target, L))
         r = L - k_target # Number of tokens to remove
         
-        if r <= 0: return x, torch.arange(L).expand(B, L), torch.ones(B, L)
+        if r <= 0: 
+            return x, torch.arange(L, device=x.device).unsqueeze(0).expand(B, L), torch.ones(B, L, device=x.device)
 
         # Compute similarity metric
         metric = self.scorer(x) # [B, L, D']
@@ -135,6 +143,8 @@ class GlobalTokenSelector(nn.Module):
 class LatentEncoder(nn.Module):
     def __init__(self, dim, depth=12, num_heads=8):
         super().__init__()
+        # Auto-adjust num_heads for small dimensions
+        num_heads = min(num_heads, max(dim // 8, 1))
         self.blocks = nn.ModuleList([
             TransformerBlock(dim, num_heads) for _ in range(depth)
         ])
@@ -155,6 +165,8 @@ class LatentEncoder(nn.Module):
 class LatentDecoder(nn.Module):
     def __init__(self, dim, depth=4, num_heads=8):
         super().__init__()
+        # Auto-adjust num_heads for small dimensions
+        num_heads = min(num_heads, max(dim // 8, 1))
         self.blocks = nn.ModuleList([
             TransformerBlock(dim, num_heads) for _ in range(depth)
         ])
@@ -165,7 +177,10 @@ class LatentDecoder(nn.Module):
             x = blk(x)
         return self.proj_out(x)
 
-# --- 4. Main Backbone with Training Logic ---
+
+
+
+
 
 class MergeDNAModel(nn.Module):
     def __init__(self, local_encoder, local_decoder, dim=512, 
@@ -217,8 +232,8 @@ class MergeDNAModel(nn.Module):
         # ==========================================
         # 2. Latent MTR Path (Adaptive Selection)
         # ==========================================
-        # Select K salient tokens (e.g., K = L/2)
-        k_target = z_l.shape[1] // 2
+        # Select K salient tokens (e.g., K = L/2), minimum 1
+        k_target = max(1, z_l.shape[1] // 2)
         
         # Detach local encoder for this path (phi not updated)
         z_l_detached = z_l.detach()
@@ -243,14 +258,17 @@ class MergeDNAModel(nn.Module):
         # 3. Adaptive Masked Token Modeling (AMTM)
         # ==========================================
         # Calculate masking probabilities: P(j) propto 1 / group_size
-        # Map group sizes back to tokens
-        token_weights = 1.0 / torch.gather(group_sizes, 1, group_ids) # [B, L]
-        token_probs = token_weights / token_weights.sum(dim=1, keepdim=True)
+        # Map group sizes back to tokens (add epsilon to avoid division by zero)
+        gathered_sizes = torch.gather(group_sizes, 1, group_ids)
+        token_weights = 1.0 / (gathered_sizes + 1e-6)  # [B, L]
+        token_probs = token_weights / (token_weights.sum(dim=1, keepdim=True) + 1e-6)
         
-        # Create Mask M_L based on probs (Mask K tokens)
+        # Create Mask M_L based on probs (Mask K tokens, but not more than L)
         # We sample indices to mask
-        mask_indices = torch.multinomial(token_probs, k_target, replacement=False)
-        mask_l = torch.zeros(B, z_l.shape[1], device=x_input.device)
+        L = z_l.shape[1]
+        num_to_mask = min(k_target, L)
+        mask_indices = torch.multinomial(token_probs, num_to_mask, replacement=False)
+        mask_l = torch.zeros(B, L, device=x_input.device)
         mask_l.scatter_(1, mask_indices, 1.0) # 1 = Masked
         
         # We must mask the INPUT X based on these token masks.

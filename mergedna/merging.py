@@ -2,7 +2,49 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 def bipartite_soft_matching(metric, r):
+    """
+    Applies Bipartite Soft Matching to find the top-r most similar pairs.
+    Splits tokens into A (evens) and B (odds) and matches B -> A.
+    
+    Args:
+        metric: [Batch, N, Dim] - Similarity features
+        r: int - Number of tokens to merge (remove)
+    
+    Returns:
+        node_indices: [Batch, N/2] - For every B, which A is its best match?
+        top_b_indices: [Batch, r] - Which B tokens (0..N/2) are actually selected to merge?
+    """
+    B, N, _ = metric.shape
+    
+    if r <= 0: return None, None
+    
+    with torch.no_grad():
+        # Normalize for cosine similarity
+        metric = metric / metric.norm(dim=-1, keepdim=True)
+        
+        # Partition: A = Evens (Destination), B = Odds (Source)
+        a = metric[:, 0::2]  # [B, N/2, C]
+        b = metric[:, 1::2]  # [B, N/2, C]
+        
+        # Compute scores: Similarity of every B to every A
+        # [B, N/2, N/2]
+        scores = a @ b.transpose(-1, -2)
+
+        # For each B, find its single best A match
+        values, node_indices = scores.max(dim=1) # values: [B, N/2], indices: [B, N/2]
+        
+        # Among all the B-A pairs, pick the 'r' strongest connections
+        _, top_b_indices = torch.topk(values, r, dim=-1) # [B, r]
+        
+    return node_indices, top_b_indices
+
+def bipartite_soft_matching_binary(metric, r):
     """
     Applies Bipartite Soft Matching to find the top-r most similar pairs.
     Partition metric into A (evens) and B (odds).
